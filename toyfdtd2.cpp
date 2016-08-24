@@ -203,7 +203,6 @@ int main(int argc, char* argv[])
 	/////////////////////////////////////////////////////////////////////////////
 	// variable declarations
 	int i,j,k; // indices of the 3D array of cells
-	int ioff_ex, ioff_ey, ioff_ez, ioff_hx, ioff_hy, ioff_hz; // offsets used in the macros below for calculating position within the data arrays
 	int nx, ny, nz; // total number of cells along the x, y, and z axes, respectively
 	int allocatedBytes = 0; // a counter to track number of bytes allocated
 
@@ -327,11 +326,6 @@ int main(int argc, char* argv[])
 
 	// Allocate memory for the E field arrays:
 
-	// compute offset constants used in macros:
-	ioff_ex = (ny+1)*(nz+1);
-	ioff_ey = ny*(nz+1);
-	ioff_ez = (ny+1)*nz;
-
 	// allocate arrays:
 	array3d Ex("Ex",nx,ny+1,nz+1);
 	array3d Ey("Ey",nx+1,ny,nz+1);
@@ -356,11 +350,6 @@ int main(int argc, char* argv[])
 	//
 	// By this arrangement, the outer faces of the mesh consist of E components
 	// only, and the H components lie only in the interior of the mesh.
-
-	// compute offset constants used in macros:
-	ioff_hx = ny*nz;
-	ioff_hy = (ny-1)*nz;
-	ioff_hz = ny*(nz-1);
 
 	// allocate arrays:
 	array3d Hx("Hx",nx-1,ny,nz);
