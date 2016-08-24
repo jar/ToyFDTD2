@@ -1,20 +1,33 @@
-CC = gcc
-CFLAGS = -O3
+KOKKOS_PATH = $(HOME)/packages/kokkos
+SRC = $(wildcard *.cpp)
 
-LIBS = -lm
+default: build
+	echo "Start Build"
 
-TARGET = toyfdtd2.x
+CXX = g++
+CXXFLAGS = -O3
+LINK = ${CXX}
+LINKFLAGS =  
+EXE = $(SRC:.cpp=.host)
+KOKKOS_DEVICES = "OpenMP"
 
-all: $(TARGET)
+DEPFLAGS = -M
 
-.SUFFIXES: .x .c
+OBJ = $(SRC:.cpp=.o)
+LIB =
 
-.c.x:
-	$(CC) $(CFLAGS) $< -o $@ $(LIBS)
+include $(KOKKOS_PATH)/Makefile.kokkos
 
-clean:
-	rm -rf *.bob
-	rm -rf *.viz
+build: $(EXE)
 
-distclean: clean
-	rm -rf $(TARGET)
+$(EXE): $(OBJ) $(KOKKOS_LINK_DEPENDS)
+	$(LINK) $(KOKKOS_LDFLAGS) $(LINKFLAGS) $(EXTRA_PATH) $(OBJ) $(KOKKOS_LIBS) $(LIB) -o $(EXE)
+
+clean: kokkos-clean 
+	rm -f *.o *.host
+	rm -rf *.bob *.viz
+
+# Compilation rules
+
+%.o:%.cpp $(KOKKOS_CPP_DEPENDS)
+	$(CXX) $(KOKKOS_CPPFLAGS) $(KOKKOS_CXXFLAGS) $(CXXFLAGS) $(EXTRA_INC) -c $<

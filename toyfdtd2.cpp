@@ -131,6 +131,7 @@
 // last iteration computed, which is always output. So if MAXIMUM_ITERATION is
 // not an integer multiple of PLOT_MODULUS, the last timestep output will come
 // after a shorter interval than that separating previous outputs.
+#include <Kokkos_Core.hpp>
 
 #define MAXIMUM_ITERATION 1000 // total number of timesteps to be computed
 #define PLOT_MODULUS 5
@@ -148,20 +149,56 @@
 // The value used for pi is M_PI as found in /usr/include/math.h on SGI IRIX
 // 6.2. Other such constants used here are DBL_EPSILON and FLT_MAX
 
-// macros to make accessing Ex, Ey, and Ez convenient
-// i.e. Ez(i,j,k)
-#define Ex(I,J,K) ex[ioff_ex*(I) + (nz+1)*(J) + (k)]
-#define Ey(I,J,K) ey[ioff_ey*(I) + (nz+1)*(J) + (k)]
-#define Ez(I,J,K) ez[ioff_ez*(I) + nz*(J) + (k)]
+typedef Kokkos::View<double***> array3d;
+typedef Kokkos::RangePolicy<int> range;
+typedef Kokkos::HostSpace Space;
+typedef struct {
+	double min = DBL_MAX;
+	double max = -DBL_MAX;
+} minmax_t;
 
-// macros to make accessing Hx, Hy, and Hz convenient
-// i.e. Hz(i,j,k)
-#define Hx(I,J,K) hx[ioff_hx*(I) + nz*(J) + (k)]
-#define Hy(I,J,K) hy[ioff_hy*(I) + nz*(J) + (k)]
-#define Hz(I,J,K) hz[ioff_hz*(I) + (nz-1)*(J) + (k)]
+struct MinMax {
+public:
+	//Required
+	typedef MinMax reducer_type;
+	typedef minmax_t value_type;
 
-int main()
+	typedef Kokkos::View<value_type, Space, Kokkos::MemoryTraits<Kokkos::Unmanaged> > result_view_type;
+
+private:
+	result_view_type result;
+
+public:
+
+	MinMax(value_type& result_):result(&result_) {}
+
+	// Required
+	KOKKOS_INLINE_FUNCTION
+	void join(value_type& dest, const value_type& src) const {
+		dest.min = (dest.min < src.min) ? dest.min : src.min;
+		dest.max = (dest.max > src.max) ? dest.max : src.max;
+	}
+
+	KOKKOS_INLINE_FUNCTION
+	void join(volatile value_type& dest, const volatile value_type& src) const {
+		dest.min = (dest.min < src.min) ? dest.min : src.min;
+		dest.max = (dest.max > src.max) ? dest.max : src.max;
+	}
+
+	// Optional
+	KOKKOS_INLINE_FUNCTION
+	void init( value_type& val) const {
+		val = value_type();
+	}
+
+	result_view_type result_view() const {
+		return result;
+	}
+};
+
+int main(int argc, char* argv[])
 {
+	Kokkos::initialize(argc, argv);
 
 	/////////////////////////////////////////////////////////////////////////////
 	// variable declarations
@@ -182,8 +219,8 @@ int main()
 	double dtmudy, dtepsdy; // physical constants used in the field update equations
 	double dtmudz, dtepsdz; // physical constants used in the field update equations
 
-	double *ex, *ey, *ez; // pointers to the arrays of ex, ey, and ez values
-	double *hx, *hy, *hz; // pointers to the arrays of hx, hy, and hz values
+	//double *ex, *ey, *ez; // pointers to the arrays of ex, ey, and ez values
+	//double *hx, *hy, *hz; // pointers to the arrays of hx, hy, and hz values
 
 	// bob output routine variables:
 	char filename[1024]; // filename variable for 3D bob files
@@ -296,12 +333,12 @@ int main()
 	ioff_ez = (ny+1)*nz;
 
 	// allocate arrays:
-	ex = (double*)calloc(nx*(ny+1)*(nz+1),sizeof(double));
-	ey = (double*)calloc((nx+1)*ny*(nz+1),sizeof(double));
-	ez = (double*)calloc((nx+1)*(ny+1)*nz,sizeof(double));
+	array3d Ex("Ex",nx,ny+1,nz+1);
+	array3d Ey("Ey",nx+1,ny,nz+1);
+	array3d Ez("Ez",nx+1,ny+1,nz);
 
 	// check if allocation successful
-	if (ex == NULL || ey == NULL || ez == NULL) {
+	if (Ex.data() == nullptr || Ey.data() == nullptr || Ez.data() == nullptr) {
 		fprintf(stderr,"E-field allocation failed. Terminating...\n");
 		exit(-1);
 	}
@@ -326,12 +363,12 @@ int main()
 	ioff_hz = ny*(nz-1);
 
 	// allocate arrays:
-	hx = (double*)calloc((nx-1)*ny*nz,sizeof(double));
-	hy = (double*)calloc(nx*(ny-1)*nz,sizeof(double));
-	hz = (double*)calloc(nx*ny*(nz-1),sizeof(double));
+	array3d Hx("Hx",nx-1,ny,nz);
+	array3d Hy("Hy",nx,ny-1,nz);
+	array3d Hz("Hz",nx,ny,nz-1);
 
 	// check if allocation successful
-	if (hx == NULL || hy == NULL || hz == NULL) {
+	if (Hx.data() == nullptr || Hy.data() == nullptr || Hz.data() == nullptr) {
 		fprintf(stderr,"E-field allocation failed. Terminating...\n");
 		exit(-1);
 	}
@@ -426,16 +463,18 @@ int main()
 			}
 
 			// find the max and min values to be output this timestep:
-			min = FLT_MAX;
-			max = -FLT_MAX;
-			for(i=0; i<(nx+1); i++) {
-				for(j=0; j<(ny+1); j++) {
-					for(k=0; k<(nz); k++) {
-						if (Ez(i,j,k) < min) min = Ez(i,j,k);
-						if (Ez(i,j,k) > max) max = Ez(i,j,k);
+			minmax_t result;
+			MinMax minmax_oper{result}; // XXX Kokkos guys need to fix this
+			Kokkos::parallel_reduce(range(0,nx+1), KOKKOS_LAMBDA(int i, minmax_t &minmax) {
+				for(int j=0; j<(ny+1); j++) {
+					for(int k=0; k<(nz); k++) {
+						if (Ez(i,j,k) < minmax.min) minmax.min = Ez(i,j,k);
+						if (Ez(i,j,k) > minmax.max) minmax.max = Ez(i,j,k);
 					}
 				}
-			}
+			}, minmax_oper );
+			min = result.min;
+			max = result.max;
 
 			// update the tracking variables for minimum and maximum
 			// values for the entire simulation:
@@ -506,62 +545,62 @@ int main()
 		// memory allocation entirely.
 
 		// Update the hx values:
-		for(i=0; i<(nx-1); i++) {
-			for(j=0; j<(ny); j++) {
-				for(k=0; k<(nz); k++) {
+		Kokkos::parallel_for( nx-1, KOKKOS_LAMBDA (int i) {
+			for(int j=0; j<(ny); j++) {
+				for(int k=0; k<(nz); k++) {
 					Hx(i,j,k) += (dtmudz*(Ey(i+1,j,k+1) - Ey(i+1,j,k)) - dtmudy*(Ez(i+1,j+1,k) - Ez(i+1,j,k)));
 				}
 			}
-		}
+		} );
 
 		// Update the hy values:
-		for(i=0; i<(nx); i++) {
-			for(j=0; j<(ny-1); j++) {
-				for(k=0; k<(nz); k++) {
+		Kokkos::parallel_for( nx, KOKKOS_LAMBDA (int i) {
+			for(int j=0; j<(ny-1); j++) {
+				for(int k=0; k<(nz); k++) {
 					Hy(i,j,k) += (dtmudx*(Ez(i+1,j+1,k) - Ez(i,j+1,k)) - dtmudz*(Ex(i,j+1,k+1) - Ex(i,j+1,k)));
 				}
 			}
-		}
+		} );
 
 		// Update the hz values:
-		for(i=0; i<(nx); i++) {
-			for(j=0; j<(ny); j++) {
-				for(k=0; k<(nz-1); k++) {
+		Kokkos::parallel_for( nx, KOKKOS_LAMBDA (int i) {
+			for(int j=0; j<(ny); j++) {
+				for(int k=0; k<(nz-1); k++) {
 					Hz(i,j,k) += (dtmudy*(Ex(i,j+1,k+1) - Ex(i,j,k+1)) - dtmudx*(Ey(i+1,j,k+1) - Ey(i,j,k+1)));
 				}
 			}
-		}
+		} );
 
 		// Update the E field vector components. The values on the faces of the mesh
 		// are not updated here; they are handled by the boundary condition
 		// computation (and stimulus computation).
 
 		// Update the ex values:
-		for(i=0; i<(nx); i++) {
-			for(j=1; j<(ny); j++) {
-				for(k=1; k<(nz); k++) {
+		Kokkos::parallel_for( nx, KOKKOS_LAMBDA (int i) {
+			for(int j=1; j<(ny); j++) {
+				for(int k=1; k<(nz); k++) {
 					Ex(i,j,k) += (dtepsdy*(Hz(i,j,k-1) - Hz(i,j-1,k-1)) - dtepsdz*(Hy(i,j-1,k) - Hy(i,j-1,k-1)));
 				}
 			}
-		}
+		} );
 
 		// Update the ey values:
-		for(i=1; i<(nx); i++) {
-			for(j=0; j<(ny); j++) {
-				for(k=1; k<(nz); k++) {
+		Kokkos::parallel_for( range(1,nx), KOKKOS_LAMBDA (int i) {
+			for(int j=0; j<(ny); j++) {
+				for(int k=1; k<(nz); k++) {
 					Ey(i,j,k) += (dtepsdz*(Hx(i-1,j,k) - Hx(i-1,j,k-1)) -	dtepsdx*(Hz(i,j,k-1) - Hz(i-1,j,k-1)));
 				}
 			}
-		}
+		} );
 
 		// Update the ez values:
-		for(i=1; i<(nx); i++) {
-			for(j=1; j<(ny); j++) {
-				for(k=0; k<(nz); k++) {
+		Kokkos::parallel_for( range(1,nx), KOKKOS_LAMBDA (int i) {
+			for(int j=1; j<(ny); j++) {
+				for(int k=0; k<(nz); k++) {
 					Ez(i,j,k) += (dtepsdx*(Hy(i,j-1,k) - Hy(i-1,j-1,k)) - dtepsdy*(Hx(i-1,j,k) - Hx(i-1,j-1,k)));
 				}
 			}
-		}
+		} );
 
 		printf("\n");
 
@@ -677,5 +716,8 @@ int main()
 	printf("bob -cmap chengGbry.cmap -s %dx%dx%d *.bob\n\n", nx+1, ny+1, nz);
 	// print out a viz command line:
 	printf("viz ToyFDTD2c.viz\n\n\n\n\n");
+
+	Kokkos::finalize();
+	return 0;
 
 } // end main
